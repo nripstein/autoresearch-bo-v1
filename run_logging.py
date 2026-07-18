@@ -13,7 +13,7 @@ RUNS_PATH = Path(__file__).with_name("runs.csv")
 RUN_FIELDS = [
     "timestamp", "iteration", "fingerprint", "lr", "weight_decay", "val_bpb",
     "wall_clock_seconds", "source", "requested_lr", "requested_weight_decay",
-    "n_prior_obs", "cold_start",
+    "n_prior_obs", "cold_start", "branch",
 ]
 
 
@@ -45,6 +45,21 @@ def run_training(train_args: list[str]) -> tuple[int, dict | None, float]:
     return returncode, result, time.monotonic() - started
 
 
+def _current_branch() -> str:
+    """Return the current Git branch, or blank when it is unavailable."""
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    branch = result.stdout.strip()
+    return "" if branch == "HEAD" else branch
+
+
 def append_run(*, fingerprint: str, source: str, wall_clock_seconds: float,
                result: dict | None, requested_lr: float | None = None,
                requested_weight_decay: float | None = None,
@@ -58,7 +73,8 @@ def append_run(*, fingerprint: str, source: str, wall_clock_seconds: float,
     with path.open("a+", newline="") as handle:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
         handle.seek(0)
-        rows = list(csv.DictReader(handle))
+        reader = csv.DictReader(handle)
+        rows = list(reader)
         iteration = max((int(row["iteration"]) for row in rows if row["iteration"]), default=0) + 1
         row = {
             "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -73,11 +89,21 @@ def append_run(*, fingerprint: str, source: str, wall_clock_seconds: float,
             "requested_weight_decay": "" if requested_weight_decay is None else requested_weight_decay,
             "n_prior_obs": "" if n_prior_obs is None else n_prior_obs,
             "cold_start": "" if cold_start is None else str(cold_start).lower(),
+            "branch": _current_branch(),
         }
-        handle.seek(0, os.SEEK_END)
         writer = csv.DictWriter(handle, fieldnames=RUN_FIELDS)
         if needs_header:
+            handle.seek(0)
             writer.writeheader()
+        elif "branch" not in (reader.fieldnames or []):
+            # Expand a legacy local log before appending so the new field cannot
+            # shift under the old header. Historical branches are unknowable.
+            handle.seek(0)
+            handle.truncate()
+            writer.writeheader()
+            writer.writerows(rows)
+        else:
+            handle.seek(0, os.SEEK_END)
         writer.writerow(row)
         handle.flush()
         os.fsync(handle.fileno())
@@ -92,6 +118,7 @@ def load_successful_runs(path: Path = RUNS_PATH) -> list[dict]:
         rows = list(csv.DictReader(handle))
     successful = []
     for row in rows:
+        row.setdefault("branch", "")
         try:
             row["lr"] = float(row["lr"])
             row["weight_decay"] = float(row["weight_decay"])
