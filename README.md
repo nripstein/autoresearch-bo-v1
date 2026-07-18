@@ -6,13 +6,22 @@
 
 The idea: give an AI agent a small but real LLM training setup and let it experiment autonomously overnight. It modifies the code, trains for 5 minutes, checks if the result improved, keeps or discards, and repeats. You wake up in the morning to a log of experiments and (hopefully) a better model. The training code here is a simplified single-GPU implementation of [nanochat](https://github.com/karpathy/nanochat). The core idea is that you're not touching any of the Python files like you normally would as a researcher. Instead, you are programming the `program.md` Markdown files that provide context to the AI agents and set up your autonomous research org. The default `program.md` in this repo is intentionally kept as a bare bones baseline, though it's obvious how one would iterate on it over time to find the "research org code" that achieves the fastest research progress, how you'd add more agents to the mix, etc. A bit more context on this project is here in this [tweet](https://x.com/karpathy/status/2029701092347630069) and [this tweet](https://x.com/karpathy/status/2031135152349524125).
 
+This fork also offers an optional Bayesian-optimization (BO) tool for two continuous optimizer settings: the Muon matrix learning rate and weight decay. The agent remains free to edit `train.py` or choose the BO tool on any iteration; BO never changes the architecture and does not pool observations across architectures.
+
 ## How it works
 
-The repo is deliberately kept small and only really has three files that matter:
+The core training loop remains deliberately small:
 
 - **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
 - **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
 - **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
+
+The BO extension adds a few supporting scripts:
+
+- **`run_manual.py`** — runs a hand-edited training attempt and appends it to `runs.csv` as an `agent` run.
+- **`propose_and_run.py`** — proposes and runs a point using Sobol initialization or a same-architecture BoTorch GP-UCB surrogate.
+- **`fingerprint.py`** — derives an architecture fingerprint from structural constants in `train.py`.
+- **`run_logging.py`** — shared subprocess parsing and append-only CSV logging.
 
 By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
 
@@ -33,8 +42,8 @@ uv sync
 # 3. Download data and train tokenizer (one-time, ~2 min)
 uv run prepare.py
 
-# 4. Manually run a single training experiment (~5 min)
-uv run train.py
+# 4. Run a hand-edited training experiment and log it (~5 min)
+uv run run_manual.py
 ```
 
 If the above commands all work ok, your setup is working and you can go into autonomous research mode.
@@ -49,12 +58,37 @@ Hi have a look at program.md and let's kick off a new experiment! let's do the s
 
 The `program.md` file is essentially a super lightweight "skill".
 
+## Optional Bayesian optimization
+
+Use `run_manual.py` for normal agent-authored experiments so every attempt lands in the local, append-only `runs.csv` log:
+
+```bash
+uv run run_manual.py
+uv run run_manual.py --lr 0.04 --weight-decay 0.2
+```
+
+`--lr` is a protected override for `MATRIX_LR`, and `--weight-decay` overrides `WEIGHT_DECAY`. At the end of a successful run, `train.py` emits an `AUTORESEARCH_RESULT=...` JSON line containing the values actually used and `val_bpb`; the wrappers use this to prevent logging a clobbered CLI hook as valid data.
+
+To let BO choose one point, run:
+
+```bash
+uv run propose_and_run.py
+```
+
+The tool fingerprints the current architecture using `DEPTH`, `ASPECT_RATIO`, `HEAD_DIM`, and `WINDOW_PATTERN`. It uses a Sobol sample until there are four successful observations for that fingerprint, then fits a BoTorch `SingleTaskGP` and selects a point with UCB. The fixed search ranges are `lr` 0.005–0.10 and `weight_decay` 0.0–0.5. Results from other fingerprints and incomplete runs never condition the surrogate.
+
+`runs.csv` is intentionally gitignored. Its rows include actual values, wall-clock time, source (`agent` or `tool`), fingerprint, and tool provenance such as the requested point and cold-start status.
+
 ## Project structure
 
 ```
 prepare.py      — constants, data prep + runtime utilities (do not modify)
 train.py        — model, optimizer, training loop (agent modifies this)
 program.md      — agent instructions
+fingerprint.py  — architecture fingerprint utility
+run_manual.py   — logged hand-edit runner
+propose_and_run.py — BO proposal and runner
+run_logging.py  — shared run-log helpers
 pyproject.toml  — dependencies
 ```
 
@@ -90,4 +124,3 @@ I think these would be the reasonable hyperparameters to play with. Ask your fav
 ## License
 
 MIT
-# autoresearch-bo-v1
