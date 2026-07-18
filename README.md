@@ -90,3 +90,4 @@ I think these would be the reasonable hyperparameters to play with. Ask your fav
 ## License
 
 MIT
+# autoresearch-bo-v1
